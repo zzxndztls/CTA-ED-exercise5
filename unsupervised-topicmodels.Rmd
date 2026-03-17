@@ -1,7 +1,7 @@
 ---
 title: "CTA-ED Exercise 5: Unsupervised learning (topic models)"
-author: "[Names of all group members here]"
-date: "13/03/2024"
+author: "Zhitong Chen,Ka Hei Leung"
+date: "17/03/2026"
 output: html_document
 ---
 ## Introduction
@@ -55,7 +55,6 @@ The code downloads these data, both Volume 1 and Volume 2, and combine them into
 This example is adapted by [Text Mining with R: A Tidy Approach](https://www.tidytextmining.com/) by Julia Silge and David Robinson.
 
 ![](data/topicmodels/gutenberg.gif){width=100%}
-
 Here, we see that Volume of Tocqueville's "Democracy in America" is stored as "815". A separate search reveals that Volume 2 is stored as "816".
 
 ```{r, eval=F}
@@ -343,5 +342,136 @@ preText_score_plot(preText_results)
 ## Exercises
 
 1. Choose another book or set of books from Project Gutenberg
+```{r setup, echo=TRUE}
+#load packages required for the tidytext workflow and modeling
+library(tidyverse)    # data wrangling
+library(tidytext)     # tidy text processing
+library(gutenbergr)   # download Project Gutenberg texts
+library(topicmodels)  # LDA implementation
+library(preText)      # preprocessing robustness checks 
+
+# set a seed so that the results are reproducible
+set.seed(1234)
+```
+
+```{r download_and_chapters, echo=TRUE}
+# Download two Jane Austen novels by Gutenberg ID
+pp <- gutenberg_download(1342)   # Pride and Prejudice
+ss <- gutenberg_download(161)    # Sense and Sensibility
+
+# Add a book label that we'll use as the "true" label later
+pp <- pp %>% mutate(book = "Pride and Prejudice")
+ss <- ss %>% mutate(book = "Sense and Sensibility")
+
+# Combine the two books into one tibble
+books <- bind_rows(pp, ss)
+
+# Create chapter identifiers by detecting lines that start with "Chapter"
+books <- books %>%
+  mutate(chapter = cumsum(str_detect(text, regex("^chapter", ignore_case = TRUE)))) %>%
+  filter(chapter > 0)  # drop front-matter before first chapter
+```
+
+```{r tidy_tokens_and_dtm, echo=TRUE}
+# Tokenize into one word per row using tidytext's unnest_tokens 
+tidy_books <- books %>%
+  select(book, chapter, text) %>%
+  unnest_tokens(word, text)
+
+# Remove stopwords using the standard stop_words dataset
+data("stop_words")
+tidy_books <- tidy_books %>%
+  anti_join(stop_words, by = "word")
+
+# Count term frequency per document (document = paste(book, chapter))
+dtm_counts <- tidy_books %>%
+  count(document = paste(book, chapter), word, sort = FALSE)
+
+# Cast to DocumentTermMatrix required by LDA
+book_dtm <- dtm_counts %>%
+  cast_dtm(document = document, term = word, value = n)
+
+# Print DTM dimensions as a quick check
+book_dtm
+```
 2. Run your own topic model on these books, changing the k of topics, and evaluating accuracy.
+
+Topic modelling (LDA)
+```{r exercise2, echo=TRUE}
+library(topicmodels)
+
+# Fit LDA model with k = 2 topics
+lda_model <- LDA(book_dtm, k = 2, control = list(seed = 1234))
+
+# Extract topic-word probabilities (beta)
+beta <- tidy(lda_model, matrix = "beta")
+
+# Display top 10 terms per topic
+top_terms <- beta %>%
+  group_by(topic) %>%
+  slice_max(beta, n = 10) %>%
+  ungroup()
+
+top_terms
+```
+
+Document classification
+```{r exercise2_classification, echo=TRUE}
+# Extract document-topic probabilities (gamma)
+gamma <- tidy(lda_model, matrix = "gamma")
+
+# Separate document into book and chapter
+gamma <- gamma %>%
+  separate(document, into = c("book", "chapter"), sep = " ", extra = "merge")
+
+# Assign each document to the most likely topic
+doc_class <- gamma %>%
+  group_by(book, chapter) %>%
+  slice_max(gamma, n = 1) %>%
+  ungroup()
+
+# Map topics to books using majority rule
+topic_map <- doc_class %>%
+  count(topic, book) %>%
+  group_by(topic) %>%
+  slice_max(n, n = 1)
+
+# Calculate accuracy
+predictions <- doc_class %>%
+  left_join(topic_map, by = "topic", suffix = c("", "_pred")) %>%
+  mutate(correct = book == book_pred)
+
+accuracy <- mean(predictions$correct)
+
+accuracy
+```
 3. Validate different pre-processing techniques using `preText` on the new book(s) of your choice. 
+
+```{r exercise3, echo=TRUE, eval=FALSE}
+
+library(preText)
+
+# Use a subset of the data to reduce computational cost
+texts_small <- books$text[1:1000]
+
+# Run factorial preprocessing WITHOUT n-grams to avoid memory issues
+fp <- factorial_preprocessing(
+  texts_small,
+  use_ngrams = FALSE,
+  parallel = FALSE,
+
+)
+
+# Run preText to evaluate preprocessing choices
+pt <- preText(fp, dataset_name = "books_subset")
+
+# Visualize preprocessing robustness
+preText_score_plot(pt)
+```
+![](pretext_plot.png)
+
+
+The preText diagnostics show clear differences in how each preprocessing combination affects the structural stability of the corpus. Combinations that include only N (normalisation) or N + E (normalisation plus basic cleaning) produce the lowest and most tightly clustered preText scores, indicating that these lighter pipelines preserve the underlying document similarity structure with minimal distortion. Adding more aggressive steps, particularly S (stemming) and W (stopword removal), consistently increases both the average score and the variance. This suggests that these transformations disproportionately alter certain documents, likely because they remove or collapse lexical information that is meaningful in this corpus. Pipelines incorporating R (sparsity trimming) or P (lemmatisation/phrase handling) show intermediate levels of distortion, performing worse than minimal cleaning but better than combinations involving stemming.
+
+Overall, the plot indicates that lighter preprocessing pipelines (e.g., N or N + E) are most appropriate for this dataset. They maintain internal consistency and avoid unnecessary structural disruption, whereas heavier pipelines—especially those involving stemming and stopword removal—introduce substantial instability. Based on these diagnostics, the recommended preprocessing strategy is to adopt a minimal pipeline that retains as much lexical information as possible while still ensuring basic text cleanliness.
+
